@@ -15,20 +15,39 @@ import queue 		# for serial command queue
 import threading 	# for multiple threads
 import os
 import pygame		# for sound
-import serial 		# for Arduino serial access
-import serial.tools.list_ports
 import subprocess 	# for shell commands
 import time
+import logging
+
+from kivy.app import App
+from kivy.lang import Builder
+from kivy.uix.button import Button
+from kivy.clock import mainthread
+from kivy.utils import platform
+
+if platform == 'android':
+    from usb4a import usb
+    from usbserial4a import serial4a
+else:
+    from serial.tools import list_ports
+    from serial import Serial
+    from serial import SerialException
+
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 
 
 ##### VARIABLES WHICH YOU CAN MODIFY #####
-loginPassword = "put_password_here"                                  # Password for web-interface
-arduinoPort = "ARDUINO"                                              # Default port which will be selected
-streamScript = "/home/pi/mjpg-streamer.sh"                           # Location of script used to start/stop video stream
-soundFolder = "/home/pi/walle-replica/web_interface/static/sounds/"  # Location of the folder containing all audio files
+loginPassword = "password"                                  # Password for web-interface
+arduinoPort = "/dev/bus/usb/001/009"                                              # Default port which will be selected
+streamScript = "/storage/emulated/0/Download/mjpg-streamer.sh"                           # Location of script used to start/stop video stream
+soundFolder = "/storage/emulated/0/Download/walle-replica/web_interface/static/sounds/"  # Location of the folder containing all audio files
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)      # Secret key used for login session cookies
-autoStartArduino = False                                             # False = no auto connect, True = automatically try to connect to default port
+autoStartArduino = True                                            # False = no auto connect, True = automatically try to connect to default port
 autoStartCamera = False                                              # False = no auto start, True = automatically start up the camera
 ##########################################
 
@@ -84,6 +103,47 @@ class arduino (threading.Thread):
 """ End of class: Arduino """
 
 
+## function that returns the serial port
+def get_serial_port(platform, device_name, port_speed, data_bits, parity, stop_bits):
+	if platform == 'android':
+		device = usb.get_usb_device(device_name)
+		if not device:
+			raise SerialException(
+				"Device {} not present!".format(device_name)
+			)
+		if not usb.has_usb_permission(device):
+			usb.request_usb_permission(device)
+			return
+		return serial4a.get_serial_port(
+			device_name,
+			port_speed,
+			data_bits,
+			parity,
+			stop_bits,
+			timeout=1
+		)
+	else:
+		return Serial(
+			device_name,
+			port_speed,
+			data_bits,
+			parity,
+			stop_bits,
+			timeout=1
+		)
+
+def get_port_list(platform):
+	if platform == 'android':
+		usb_device_list = usb.get_usb_device_list()
+		device_name_list = [
+			device.getDeviceName() for device in usb_device_list
+		]
+
+	else:
+		usb_device_list = list_ports.comports()
+		device_name_list = [port.device for port in usb_device_list]
+	return usb_device_list, device_name_list
+
 ##
 # Send data to the Arduino from a buffer queue
 #
@@ -94,7 +154,7 @@ class arduino (threading.Thread):
 def process_data(threadName, q, port):
 	global exitFlag
 	
-	ser = serial.Serial(port,115200)
+	ser = get_serial_port(platform, port, 115200, 8,	'N',	1)
 	ser.flushInput()
 	dataString = ""
 
@@ -160,10 +220,10 @@ def onoff_arduino(q, portNum):
 	# Set up thread and connect to Arduino
 	if not arduinoActive:
 		exitFlag = 0
-
+		usb_list, device_names = get_port_list(platform)
 		usb_ports = [
-			p.device
-			for p in serial.tools.list_ports.comports()
+			p
+			for p in device_names
 		]
 		
 		thread = arduino(1, "Arduino", q, usb_ports[portNum])
@@ -284,10 +344,15 @@ def index():
 			files.append((audiogroup,audiofiles,audionames,audiotimes))
 	
 	# Get list of connected USB devices
-	ports = serial.tools.list_ports.comports()
+	usb_list, device_names = get_port_list(platform)
+	logging.warn("USB list: %s", usb_list)
+	print(usb_list)
+	#[<android.hardware.usb.UsbDevice at 0x78668ab2f0 jclass=android/hardware/usb/UsbDevice jself=<LocalRef obj=0x68ba at 0x786672fcb0>>, <android.hardware.usb.UsbDevice at 0x78668ab1d0 jclass=android/hardware/usb/UsbDevice jself=<LocalRef obj=0x689a at 0x786672fb10>>, <android.hardware.usb.UsbDevice at 0x78668aadb0 jclass=android/hardware/usb/UsbDevice jself=<LocalRef obj=0x6876 at 0x786672faf0>>, <android.hardware.usb.UsbDevice at 0x78668ab350 jclass=android/hardware/usb/UsbDevice jself=<LocalRef obj=0x6866 at 0x786672fe70>>, <android.hardware.usb.UsbDevice at 0x78668aaed0 jclass=android/hardware/usb/UsbDevice jself=<LocalRef obj=0x6856 at 0x786672ffb0>>]
+	print(device_names)
+	#['/dev/bus/usb/001/006', '/dev/bus/usb/001/008', '/dev/bus/usb/001/007', '/dev/bus/usb/001/003', '/dev/bus/usb/001/010']
 	usb_ports = [
-		p.description
-		for p in serial.tools.list_ports.comports()
+		p
+		for p in device_names
 		#if 'ttyACM0' in p.description
 	]
 	
@@ -533,10 +598,10 @@ def arduinoConnect():
 			print("Reload list of connected USB ports")
 			
 			# Get list of connected USB devices
-			ports = serial.tools.list_ports.comports()
+			usb_list, device_names = get_port_list(platform)
 			usb_ports = [
-				p.description
-				for p in serial.tools.list_ports.comports()
+				p
+				for p in device_names
 				#if 'ttyACM0' in p.description
 			]
 			
@@ -562,14 +627,15 @@ def arduinoConnect():
 				if port is not None and port.isdigit():
 					portNum = int(port)
 					# Test whether connection to the selected port is possible
+					usb_list, device_names = get_port_list(platform)
 					usb_ports = [
-						p.device
-						for p in serial.tools.list_ports.comports()
+						p
+						for p in device_names
 					]
 					if portNum >= 0 and portNum < len(usb_ports):
 						# Try opening and closing port to see if connection is possible
 						try:
-							ser = serial.Serial(usb_ports[portNum],115200)
+							ser = get_serial_port(platform, usb_ports[portNum], 115200, 8,	'N',	1)
 							if (ser.inWaiting() > 0):
 								ser.flushInput()
 							ser.close()
